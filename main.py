@@ -295,7 +295,8 @@ def {target_table}():
             )
         ],
         continuous=False,
-        development=True
+        development=True,
+        serverless=True
     )
 
     return (
