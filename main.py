@@ -183,7 +183,8 @@ def upload_pipeline_notebook(
     transformation_code: str,
     source_table: str = "",
     source_volume: str = "",
-    file_format: str = "json"
+    file_format: str = "json",
+    overwrite: bool = True
 ) -> str:
     """
     Generate and upload a DLT pipeline notebook to Databricks workspace.
@@ -198,12 +199,14 @@ def upload_pipeline_notebook(
         target_schema: Target UC schema
         target_table: Target table name
         key_columns: Comma separated columns for deduplication (e.g. "time")
-        transformation_code: Valid PySpark chained transformations e.g.
-                             '.withColumn("time", to_timestamp(col("time")))'
-                             Leave empty string if no transformations needed.
+        transformation_code: Raw PySpark chained calls applied BEFORE dedup.
+                             Must start with a dot. Example:
+                             .withColumn("time", to_timestamp(col("time")))
+                             Pass empty string if no transformations needed.
         source_table: Source table name (required if source_type is 'table')
         source_volume: Source volume name (required if source_type is 'volume')
         file_format: File format json/csv/parquet (required if source_type is 'volume')
+        overwrite: Whether to overwrite existing notebook (default True)
     """
     w = get_client()
 
@@ -214,6 +217,8 @@ def upload_pipeline_notebook(
         source_read = (
             f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
         )
+        # For table sources order by first key column — _metadata not available
+        window_order = f'col("{key_columns.split(",")[0].strip()}")'
     else:
         source_read = (
             f'spark.readStream\n'
@@ -223,9 +228,11 @@ def upload_pipeline_notebook(
             f'                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\n'
             f'            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'
         )
+        # For volume sources _metadata.file_modification_time is available
+        window_order = 'col("_metadata.file_modification_time")'
 
-    # transformation_code is raw PySpark passed directly — no parsing
-    transform_code = f"\n            {transformation_code}" if transformation_code else ""
+    # transformation_code passed verbatim — zero parsing
+    transform_code = f"\n            {transformation_code.strip()}" if transformation_code.strip() else ""
 
     notebook_code = f'''import dlt
 from pyspark.sql.functions import col, row_number, to_timestamp
@@ -248,9 +255,7 @@ def {target_table}_raw():
 )
 def {target_table}():
     key_cols = [{key_cols_str}]
-    window = Window.partitionBy(*key_cols).orderBy(
-        col("_metadata.file_modification_time").desc()
-    )
+    window = Window.partitionBy(*key_cols).orderBy({window_order}.desc())
     return (
         dlt.read_stream("{target_table}_raw"){transform_code}
             .withColumn("_rank", row_number().over(window))
@@ -271,7 +276,7 @@ def {target_table}():
         content=base64.b64encode(notebook_code.encode()).decode(),
         format=ImportFormat.SOURCE,
         language=Language.PYTHON,
-        overwrite=True
+        overwrite=overwrite
     )
 
     return f"Notebook uploaded successfully to: {notebook_path}"
@@ -282,7 +287,8 @@ def create_dlt_pipeline(
     pipeline_name: str,
     notebook_path: str,
     target_catalog: str,
-    target_schema: str
+    target_schema: str,
+    allow_duplicate_names: bool = False
 ) -> str:
     """
     Create a DLT pipeline from an already uploaded notebook.
@@ -293,6 +299,7 @@ def create_dlt_pipeline(
         notebook_path: Workspace path returned by upload_pipeline_notebook
         target_catalog: Target UC catalog
         target_schema: Target UC schema
+        allow_duplicate_names: Set True to allow creating pipeline with duplicate name
     """
     w = get_client()
 
@@ -307,7 +314,8 @@ def create_dlt_pipeline(
         ],
         continuous=False,
         development=True,
-        serverless=True
+        serverless=True,
+        allow_duplicate_names=allow_duplicate_names
     )
 
     return (
