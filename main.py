@@ -209,27 +209,35 @@ def deploy_dlt_pipeline(
 
     # Build transformation code from plain English
     transform_lines = []
-    if "string to timestamp" in transformations.lower() or "timestamp" in transformations.lower():
-        # find column names mentioned
+    if "timestamp" in transformations.lower():
         for word in transformations.lower().split():
-            if word not in ["convert", "from", "string", "to", "timestamp", "the", "column", "and", "columns"]:
-                transform_lines.append(f'        .withColumn("{word}", col("{word}").cast("timestamp"))')
+            if word not in [
+                "convert", "from", "string", "to", "timestamp",
+                "the", "column", "and", "columns", "cast"
+            ]:
+                transform_lines.append(
+                    f'            .withColumn("{word}", to_timestamp(col("{word}")))'
+                )
 
     transform_code = "\n".join(transform_lines) if transform_lines else ""
 
     # Build source read based on source_type
     if source_type == "table":
-        source_read = f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
+        source_read = (
+            f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
+        )
     else:
-        source_read = f'''spark.readStream\\
-            .format("cloudFiles")\\
-            .option("cloudFiles.format", "{file_format}")\\
-            .option("cloudFiles.schemaLocation",
-                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\\
-            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'''
+        source_read = (
+            f'spark.readStream\n'
+            f'            .format("cloudFiles")\n'
+            f'            .option("cloudFiles.format", "{file_format}")\n'
+            f'            .option("cloudFiles.schemaLocation",\n'
+            f'                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\n'
+            f'            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'
+        )
 
     notebook_code = f'''import dlt
-from pyspark.sql.functions import col, row_number
+from pyspark.sql.functions import col, row_number, to_timestamp
 from pyspark.sql.window import Window
 
 
@@ -245,11 +253,13 @@ def {target_table}_raw():
 
 @dlt.table(
     name="{target_table}",
-    comment="Cleaned and deduplicated table. Transformations: {transformations}"
+    comment="Cleaned and deduplicated. Transformations: {transformations}"
 )
 def {target_table}():
     key_cols = [{key_cols_str}]
-    window = Window.partitionBy(*key_cols).orderBy(col("_metadata.file_modification_time").desc())
+    window = Window.partitionBy(*key_cols).orderBy(
+        col("_metadata.file_modification_time").desc()
+    )
     return (
         dlt.read_stream("{target_table}_raw")
 {transform_code}
@@ -260,6 +270,12 @@ def {target_table}():
 '''
 
     notebook_path = f"/Shared/pipelines/{pipeline_name}"
+
+    # Auto-create folder if it doesn't exist
+    try:
+        w.workspace.mkdirs(path="/Shared/pipelines")
+    except Exception:
+        pass
 
     w.workspace.import_(
         path=notebook_path,
