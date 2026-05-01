@@ -53,6 +53,22 @@ def get_tables(catalog: str, schema: str) -> str:
     return "\n".join([t.name for t in tables])
 
 @mcp.tool()
+def list_pipelines() -> str:
+    """List all DLT pipelines in the workspace."""
+    w = get_client()
+    pipelines = list(w.pipelines.list_pipelines())
+    if not pipelines:
+        return "No pipelines found."
+    return "\n".join([f"{p.pipeline_id}: {p.name}" for p in pipelines])
+
+@mcp.tool()
+def get_pipeline_status(pipeline_id: str) -> str:
+    """Get the current status of a DLT pipeline."""
+    w = get_client()
+    p = w.pipelines.get(pipeline_id=pipeline_id)
+    return f"Name: {p.name}\nState: {p.state}\nHealth: {p.health}"
+
+@mcp.tool()
 def get_table_schema(catalog: str, schema: str, table: str) -> str:
     """Get column names and types for a Unity Catalog table."""
     w = get_client()
