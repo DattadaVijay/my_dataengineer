@@ -47,4 +47,5 @@ if __name__ == "__main__":
     mcp.settings.host = "0.0.0.0"
     mcp.settings.port = port
     mcp.settings.stateless_http = True
+    mcp.settings.allowed_hosts = ["*"]
     mcp.run(transport="streamable-http")
