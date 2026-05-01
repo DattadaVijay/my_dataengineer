@@ -44,6 +44,15 @@ def get_schemas(catalog: str) -> str:
     return "\n".join([s.name for s in schemas])
 
 @mcp.tool()
+def get_tables(catalog: str, schema: str) -> str:
+    """List all tables in a Unity Catalog schema."""
+    w = get_client()
+    tables = list(w.tables.list(catalog_name=catalog, schema_name=schema))
+    if not tables:
+        return f"No tables found in {catalog}.{schema}"
+    return "\n".join([t.name for t in tables])
+
+@mcp.tool()
 def get_table_schema(catalog: str, schema: str, table: str) -> str:
     """Get column names and types for a Unity Catalog table."""
     w = get_client()
