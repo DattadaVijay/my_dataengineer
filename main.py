@@ -1,7 +1,12 @@
 import os
+import json
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from databricks.sdk import WorkspaceClient
+from databricks.sdk.service.pipelines import PipelineLibrary, NotebookLibrary
+from databricks.sdk.service.workspace import ImportFormat, Language
+from databricks import sql
+import base64
 
 load_dotenv()
 
@@ -12,6 +17,22 @@ def get_client():
         host=os.environ["DATABRICKS_HOST"],
         token=os.environ["DATABRICKS_TOKEN"]
     )
+
+def get_sql_connection():
+    return sql.connect(
+        server_hostname=os.environ["DATABRICKS_HOST"].replace("https://", ""),
+        http_path=os.environ["DATABRICKS_HTTP_PATH"],
+        access_token=os.environ["DATABRICKS_TOKEN"]
+    )
+
+def run_query(query: str) -> list[dict]:
+    with get_sql_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute(query)
+            cols = [d[0] for d in cursor.description]
+            return [dict(zip(cols, row)) for row in cursor.fetchall()]
+
+# ── Layer 1 — UC Metadata ─────────────────────────────────────────────────────
 
 @mcp.tool()
 def get_schemas(catalog: str) -> str:
@@ -41,6 +62,192 @@ def get_volume_contents(catalog: str, schema: str, volume: str) -> str:
     if not files:
         return f"Volume '{path}' is empty."
     return "\n".join([f.path for f in files])
+
+# ── Layer 2 — Data Quality + Volume Intelligence ──────────────────────────────
+
+@mcp.tool()
+def get_table_row_count(catalog: str, schema: str, table: str) -> str:
+    """Get the total row count of a table."""
+    rows = run_query(f"SELECT COUNT(*) as count FROM {catalog}.{schema}.{table}")
+    return f"Row count: {rows[0]['count']}"
+
+@mcp.tool()
+def get_null_counts(catalog: str, schema: str, table: str) -> str:
+    """Get null percentage for each column in a table."""
+    full = f"{catalog}.{schema}.{table}"
+    w = get_client()
+    t = w.tables.get(full_name=full)
+    cols = [c.name for c in t.columns]
+    null_exprs = ", ".join([
+        f"ROUND(SUM(CASE WHEN {c} IS NULL THEN 1 ELSE 0 END) * 100.0 / COUNT(*), 2) AS {c}"
+        for c in cols
+    ])
+    rows = run_query(f"SELECT {null_exprs} FROM {full}")
+    if not rows:
+        return "No data."
+    return "\n".join([f"{k}: {v}% null" for k, v in rows[0].items()])
+
+@mcp.tool()
+def get_duplicate_rate(catalog: str, schema: str, table: str, key_columns: str) -> str:
+    """Check duplicate rate for given key columns (comma separated)."""
+    full = f"{catalog}.{schema}.{table}"
+    keys = ", ".join([k.strip() for k in key_columns.split(",")])
+    rows = run_query(f"""
+        SELECT COUNT(*) as total,
+               COUNT(DISTINCT {keys}) as unique_keys,
+               ROUND((COUNT(*) - COUNT(DISTINCT {keys})) * 100.0 / COUNT(*), 2) as dup_pct
+        FROM {full}
+    """)
+    r = rows[0]
+    return f"Total: {r['total']} | Unique: {r['unique_keys']} | Duplicate rate: {r['dup_pct']}%"
+
+@mcp.tool()
+def get_data_skew(catalog: str, schema: str, table: str, partition_column: str) -> str:
+    """Check data distribution across a partition column."""
+    full = f"{catalog}.{schema}.{table}"
+    rows = run_query(f"""
+        SELECT {partition_column}, COUNT(*) as row_count
+        FROM {full}
+        GROUP BY {partition_column}
+        ORDER BY row_count DESC
+        LIMIT 20
+    """)
+    if not rows:
+        return "No data."
+    return "\n".join([f"{r[partition_column]}: {r['row_count']} rows" for r in rows])
+
+@mcp.tool()
+def get_table_sample(catalog: str, schema: str, table: str) -> str:
+    """Get 5 sample rows from a table to understand structure."""
+    rows = run_query(f"SELECT * FROM {catalog}.{schema}.{table} LIMIT 5")
+    if not rows:
+        return "No data."
+    return "\n".join([str(r) for r in rows])
+
+@mcp.tool()
+def get_volume_file_schema(catalog: str, schema: str, volume: str, file_format: str = "json") -> str:
+    """
+    Infer schema from files in a UC volume by sampling the first file.
+    Supported formats: json, csv, parquet.
+    """
+    rows = run_query(f"""
+        SELECT *
+        FROM read_files(
+            '/Volumes/{catalog}/{schema}/{volume}',
+            format => '{file_format}'
+        )
+        LIMIT 1
+    """)
+    if not rows:
+        return "Could not infer schema — volume may be empty or unsupported format."
+    cols = list(rows[0].keys())
+    return f"Inferred columns: {', '.join(cols)}\nSample row: {json.dumps(rows[0], default=str)}"
+
+# ── Layer 3 — Generate + Deploy DLT Pipeline via SDK ─────────────────────────
+
+@mcp.tool()
+def deploy_dlt_pipeline(
+    pipeline_name: str,
+    source_catalog: str,
+    source_schema: str,
+    source_volume: str,
+    file_format: str,
+    target_catalog: str,
+    target_schema: str,
+    target_table: str,
+    key_columns: str
+) -> str:
+    """
+    Generate a Spark Declarative Pipeline notebook and deploy it to Databricks.
+    Creates the pipeline with autoloader + deduplication.
+    All parameters must be explicitly provided by the user.
+
+    Args:
+        pipeline_name: Name of the pipeline (e.g. airport_sensors_pipeline)
+        source_catalog: Source UC catalog
+        source_schema: Source UC schema
+        source_volume: Source UC volume name
+        file_format: File format in volume (json, csv, parquet)
+        target_catalog: Target UC catalog
+        target_schema: Target UC schema
+        target_table: Target table name
+        key_columns: Comma separated columns for deduplication (e.g. id,timestamp)
+    """
+    w = get_client()
+
+    key_cols_list = [f'"{k.strip()}"' for k in key_columns.split(",")]
+    key_cols_str = ", ".join(key_cols_list)
+
+    notebook_code = f'''import dlt
+from pyspark.sql.functions import col, row_number
+from pyspark.sql.window import Window
+
+
+@dlt.table(
+    name="{target_table}_raw",
+    comment="Raw autoloaded data from /Volumes/{source_catalog}/{source_schema}/{source_volume}"
+)
+def {target_table}_raw():
+    return (
+        spark.readStream
+            .format("cloudFiles")
+            .option("cloudFiles.format", "{file_format}")
+            .option("cloudFiles.schemaLocation",
+                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")
+            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")
+    )
+
+
+@dlt.table(
+    name="{target_table}",
+    comment="Deduplicated clean table keyed on {key_columns}"
+)
+def {target_table}():
+    key_cols = [{key_cols_str}]
+    window = Window.partitionBy(*key_cols).orderBy(
+        col("_metadata.file_modification_time").desc()
+    )
+    return (
+        dlt.read_stream("{target_table}_raw")
+            .withColumn("_rank", row_number().over(window))
+            .filter(col("_rank") == 1)
+            .drop("_rank")
+    )
+'''
+
+    notebook_path = f"/Shared/pipelines/{pipeline_name}"
+
+    w.workspace.import_(
+        path=notebook_path,
+        content=base64.b64encode(notebook_code.encode()).decode(),
+        format=ImportFormat.SOURCE,
+        language=Language.PYTHON,
+        overwrite=True
+    )
+
+    pipeline = w.pipelines.create(
+        name=pipeline_name,
+        catalog=target_catalog,
+        schema=target_schema,
+        libraries=[
+            PipelineLibrary(
+                notebook=NotebookLibrary(path=notebook_path)
+            )
+        ],
+        continuous=False,
+        development=True
+    )
+
+    return (
+        f"Pipeline '{pipeline_name}' created successfully.\n"
+        f"Pipeline ID: {pipeline.pipeline_id}\n"
+        f"Notebook: {notebook_path}\n"
+        f"Target: {target_catalog}.{target_schema}.{target_table}\n"
+        f"Source: /Volumes/{source_catalog}/{source_schema}/{source_volume}\n"
+        f"Key columns: {key_columns}"
+    )
+
+# ── Run ───────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8000))
