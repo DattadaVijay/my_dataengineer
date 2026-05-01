@@ -1,12 +1,12 @@
 import os
 import json
+import base64
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.pipelines import PipelineLibrary, NotebookLibrary
 from databricks.sdk.service.workspace import ImportFormat, Language
 from databricks import sql
-import base64
 
 load_dotenv()
 
@@ -51,22 +51,6 @@ def get_tables(catalog: str, schema: str) -> str:
     if not tables:
         return f"No tables found in {catalog}.{schema}"
     return "\n".join([t.name for t in tables])
-
-@mcp.tool()
-def list_pipelines() -> str:
-    """List all DLT pipelines in the workspace."""
-    w = get_client()
-    pipelines = list(w.pipelines.list_pipelines())
-    if not pipelines:
-        return "No pipelines found."
-    return "\n".join([f"{p.pipeline_id}: {p.name}" for p in pipelines])
-
-@mcp.tool()
-def get_pipeline_status(pipeline_id: str) -> str:
-    """Get the current status of a DLT pipeline."""
-    w = get_client()
-    p = w.pipelines.get(pipeline_id=pipeline_id)
-    return f"Name: {p.name}\nState: {p.state}\nHealth: {p.health}"
 
 @mcp.tool()
 def get_table_schema(catalog: str, schema: str, table: str) -> str:
@@ -168,40 +152,81 @@ def get_volume_file_schema(catalog: str, schema: str, volume: str, file_format: 
     cols = list(rows[0].keys())
     return f"Inferred columns: {', '.join(cols)}\nSample row: {json.dumps(rows[0], default=str)}"
 
-# ── Layer 3 — Generate + Deploy DLT Pipeline via SDK ─────────────────────────
+# ── Layer 3 — Pipeline Management ────────────────────────────────────────────
+
+@mcp.tool()
+def list_pipelines() -> str:
+    """List all DLT pipelines in the workspace."""
+    w = get_client()
+    pipelines = list(w.pipelines.list_pipelines())
+    if not pipelines:
+        return "No pipelines found."
+    return "\n".join([f"{p.pipeline_id}: {p.name}" for p in pipelines])
+
+@mcp.tool()
+def get_pipeline_status(pipeline_id: str) -> str:
+    """Get the current status of a DLT pipeline."""
+    w = get_client()
+    p = w.pipelines.get(pipeline_id=pipeline_id)
+    return f"Name: {p.name}\nState: {p.state}\nHealth: {p.health}"
 
 @mcp.tool()
 def deploy_dlt_pipeline(
     pipeline_name: str,
-    source_catalog: str,
-    source_schema: str,
-    source_volume: str,
-    file_format: str,
+    source_type: str,
     target_catalog: str,
     target_schema: str,
     target_table: str,
-    key_columns: str
+    key_columns: str,
+    transformations: str,
+    source_catalog: str = "",
+    source_schema: str = "",
+    source_table: str = "",
+    source_volume: str = "",
+    file_format: str = "json"
 ) -> str:
     """
-    Generate a Spark Declarative Pipeline notebook and deploy it to Databricks.
-    Creates the pipeline with autoloader + deduplication.
-    All parameters must be explicitly provided by the user.
+    Generate and deploy a Spark Declarative Pipeline to Databricks.
 
     Args:
-        pipeline_name: Name of the pipeline (e.g. airport_sensors_pipeline)
-        source_catalog: Source UC catalog
-        source_schema: Source UC schema
-        source_volume: Source UC volume name
-        file_format: File format in volume (json, csv, parquet)
+        pipeline_name: Name of the pipeline (e.g. azure_logs_pipeline)
+        source_type: Either 'table' (streaming from UC table) or 'volume' (autoloader from UC volume)
         target_catalog: Target UC catalog
         target_schema: Target UC schema
         target_table: Target table name
         key_columns: Comma separated columns for deduplication (e.g. id,timestamp)
+        transformations: Plain English description of transformations (e.g. 'convert time column from string to timestamp')
+        source_catalog: Source catalog (required for both source types)
+        source_schema: Source schema (required for both source types)
+        source_table: Source table name (required if source_type is 'table')
+        source_volume: Source volume name (required if source_type is 'volume')
+        file_format: File format (required if source_type is 'volume') - json, csv, parquet
     """
     w = get_client()
 
     key_cols_list = [f'"{k.strip()}"' for k in key_columns.split(",")]
     key_cols_str = ", ".join(key_cols_list)
+
+    # Build transformation code from plain English
+    transform_lines = []
+    if "string to timestamp" in transformations.lower() or "timestamp" in transformations.lower():
+        # find column names mentioned
+        for word in transformations.lower().split():
+            if word not in ["convert", "from", "string", "to", "timestamp", "the", "column", "and", "columns"]:
+                transform_lines.append(f'        .withColumn("{word}", col("{word}").cast("timestamp"))')
+
+    transform_code = "\n".join(transform_lines) if transform_lines else ""
+
+    # Build source read based on source_type
+    if source_type == "table":
+        source_read = f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
+    else:
+        source_read = f'''spark.readStream\\
+            .format("cloudFiles")\\
+            .option("cloudFiles.format", "{file_format}")\\
+            .option("cloudFiles.schemaLocation",
+                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\\
+            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'''
 
     notebook_code = f'''import dlt
 from pyspark.sql.functions import col, row_number
@@ -210,30 +235,24 @@ from pyspark.sql.window import Window
 
 @dlt.table(
     name="{target_table}_raw",
-    comment="Raw autoloaded data from /Volumes/{source_catalog}/{source_schema}/{source_volume}"
+    comment="Raw streaming data from {source_type} source"
 )
 def {target_table}_raw():
     return (
-        spark.readStream
-            .format("cloudFiles")
-            .option("cloudFiles.format", "{file_format}")
-            .option("cloudFiles.schemaLocation",
-                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")
-            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")
+        {source_read}
     )
 
 
 @dlt.table(
     name="{target_table}",
-    comment="Deduplicated clean table keyed on {key_columns}"
+    comment="Cleaned and deduplicated table. Transformations: {transformations}"
 )
 def {target_table}():
     key_cols = [{key_cols_str}]
-    window = Window.partitionBy(*key_cols).orderBy(
-        col("_metadata.file_modification_time").desc()
-    )
+    window = Window.partitionBy(*key_cols).orderBy(col("_metadata.file_modification_time").desc())
     return (
         dlt.read_stream("{target_table}_raw")
+{transform_code}
             .withColumn("_rank", row_number().over(window))
             .filter(col("_rank") == 1)
             .drop("_rank")
@@ -267,9 +286,10 @@ def {target_table}():
         f"Pipeline '{pipeline_name}' created successfully.\n"
         f"Pipeline ID: {pipeline.pipeline_id}\n"
         f"Notebook: {notebook_path}\n"
+        f"Source type: {source_type}\n"
         f"Target: {target_catalog}.{target_schema}.{target_table}\n"
-        f"Source: /Volumes/{source_catalog}/{source_schema}/{source_volume}\n"
-        f"Key columns: {key_columns}"
+        f"Key columns: {key_columns}\n"
+        f"Transformations: {transformations}"
     )
 
 # ── Run ───────────────────────────────────────────────────────────────────────
