@@ -171,43 +171,43 @@ def get_pipeline_status(pipeline_id: str) -> str:
     return f"Name: {p.name}\nState: {p.state}\nHealth: {p.health}"
 
 @mcp.tool()
-def deploy_dlt_pipeline(
+def upload_pipeline_notebook(
     pipeline_name: str,
     source_type: str,
+    source_catalog: str,
+    source_schema: str,
     target_catalog: str,
     target_schema: str,
     target_table: str,
     key_columns: str,
     transformations: str,
-    source_catalog: str = "",
-    source_schema: str = "",
     source_table: str = "",
     source_volume: str = "",
     file_format: str = "json"
 ) -> str:
     """
-    Generate and deploy a Spark Declarative Pipeline to Databricks.
+    Generate and upload a DLT pipeline notebook to Databricks workspace.
+    Call this first, then call create_dlt_pipeline with the returned notebook path.
 
     Args:
         pipeline_name: Name of the pipeline (e.g. azure_logs_pipeline)
-        source_type: Either 'table' (streaming from UC table) or 'volume' (autoloader from UC volume)
+        source_type: Either 'table' or 'volume'
+        source_catalog: Source UC catalog
+        source_schema: Source UC schema
         target_catalog: Target UC catalog
         target_schema: Target UC schema
         target_table: Target table name
-        key_columns: Comma separated columns for deduplication (e.g. id,timestamp)
-        transformations: Plain English description of transformations (e.g. 'convert time column from string to timestamp')
-        source_catalog: Source catalog (required for both source types)
-        source_schema: Source schema (required for both source types)
-        source_table: Source table name (required if source_type is 'table')
-        source_volume: Source volume name (required if source_type is 'volume')
-        file_format: File format (required if source_type is 'volume') - json, csv, parquet
+        key_columns: Comma separated columns for deduplication
+        transformations: Plain English transformations (e.g. 'convert time to timestamp')
+        source_table: Source table name (if source_type is 'table')
+        source_volume: Source volume name (if source_type is 'volume')
+        file_format: File format (if source_type is 'volume')
     """
     w = get_client()
 
     key_cols_list = [f'"{k.strip()}"' for k in key_columns.split(",")]
     key_cols_str = ", ".join(key_cols_list)
 
-    # Build transformation code from plain English
     transform_lines = []
     if "timestamp" in transformations.lower():
         for word in transformations.lower().split():
@@ -218,10 +218,8 @@ def deploy_dlt_pipeline(
                 transform_lines.append(
                     f'            .withColumn("{word}", to_timestamp(col("{word}")))'
                 )
-
     transform_code = "\n".join(transform_lines) if transform_lines else ""
 
-    # Build source read based on source_type
     if source_type == "table":
         source_read = (
             f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
@@ -271,7 +269,6 @@ def {target_table}():
 
     notebook_path = f"/Shared/pipelines/{pipeline_name}"
 
-    # Auto-create folder if it doesn't exist
     try:
         w.workspace.mkdirs(path="/Shared/pipelines")
     except Exception:
@@ -284,6 +281,28 @@ def {target_table}():
         language=Language.PYTHON,
         overwrite=True
     )
+
+    return f"Notebook uploaded successfully to: {notebook_path}"
+
+
+@mcp.tool()
+def create_dlt_pipeline(
+    pipeline_name: str,
+    notebook_path: str,
+    target_catalog: str,
+    target_schema: str
+) -> str:
+    """
+    Create a DLT pipeline from an already uploaded notebook.
+    Always call upload_pipeline_notebook first to get the notebook_path.
+
+    Args:
+        pipeline_name: Name of the pipeline
+        notebook_path: Workspace path returned by upload_pipeline_notebook
+        target_catalog: Target UC catalog
+        target_schema: Target UC schema
+    """
+    w = get_client()
 
     pipeline = w.pipelines.create(
         name=pipeline_name,
@@ -303,10 +322,7 @@ def {target_table}():
         f"Pipeline '{pipeline_name}' created successfully.\n"
         f"Pipeline ID: {pipeline.pipeline_id}\n"
         f"Notebook: {notebook_path}\n"
-        f"Source type: {source_type}\n"
-        f"Target: {target_catalog}.{target_schema}.{target_table}\n"
-        f"Key columns: {key_columns}\n"
-        f"Transformations: {transformations}"
+        f"Target: {target_catalog}.{target_schema}"
     )
 
 # ── Run ───────────────────────────────────────────────────────────────────────
