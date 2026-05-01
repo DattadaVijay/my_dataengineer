@@ -180,7 +180,7 @@ def upload_pipeline_notebook(
     target_schema: str,
     target_table: str,
     key_columns: str,
-    transformations: str,
+    transformation_code: str,
     source_table: str = "",
     source_volume: str = "",
     file_format: str = "json"
@@ -197,28 +197,18 @@ def upload_pipeline_notebook(
         target_catalog: Target UC catalog
         target_schema: Target UC schema
         target_table: Target table name
-        key_columns: Comma separated columns for deduplication
-        transformations: Plain English transformations (e.g. 'convert time to timestamp')
-        source_table: Source table name (if source_type is 'table')
-        source_volume: Source volume name (if source_type is 'volume')
-        file_format: File format (if source_type is 'volume')
+        key_columns: Comma separated columns for deduplication (e.g. "time")
+        transformation_code: Valid PySpark chained transformations e.g.
+                             '.withColumn("time", to_timestamp(col("time")))'
+                             Leave empty string if no transformations needed.
+        source_table: Source table name (required if source_type is 'table')
+        source_volume: Source volume name (required if source_type is 'volume')
+        file_format: File format json/csv/parquet (required if source_type is 'volume')
     """
     w = get_client()
 
     key_cols_list = [f'"{k.strip()}"' for k in key_columns.split(",")]
     key_cols_str = ", ".join(key_cols_list)
-
-    transform_lines = []
-    if "timestamp" in transformations.lower():
-        for word in transformations.lower().split():
-            if word not in [
-                "convert", "from", "string", "to", "timestamp",
-                "the", "column", "and", "columns", "cast"
-            ]:
-                transform_lines.append(
-                    f'            .withColumn("{word}", to_timestamp(col("{word}")))'
-                )
-    transform_code = "\n".join(transform_lines) if transform_lines else ""
 
     if source_type == "table":
         source_read = (
@@ -233,6 +223,9 @@ def upload_pipeline_notebook(
             f'                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\n'
             f'            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'
         )
+
+    # transformation_code is raw PySpark passed directly — no parsing
+    transform_code = f"\n            {transformation_code}" if transformation_code else ""
 
     notebook_code = f'''import dlt
 from pyspark.sql.functions import col, row_number, to_timestamp
@@ -251,7 +244,7 @@ def {target_table}_raw():
 
 @dlt.table(
     name="{target_table}",
-    comment="Cleaned and deduplicated. Transformations: {transformations}"
+    comment="Cleaned and deduplicated table"
 )
 def {target_table}():
     key_cols = [{key_cols_str}]
@@ -259,8 +252,7 @@ def {target_table}():
         col("_metadata.file_modification_time").desc()
     )
     return (
-        dlt.read_stream("{target_table}_raw")
-{transform_code}
+        dlt.read_stream("{target_table}_raw"){transform_code}
             .withColumn("_rank", row_number().over(window))
             .filter(col("_rank") == 1)
             .drop("_rank")
