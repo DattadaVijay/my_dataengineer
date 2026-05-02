@@ -174,9 +174,10 @@ def get_pipeline_status(pipeline_id: str) -> str:
 def get_pipeline_by_name(pipeline_name: str) -> str:
     """
     Check if a DLT pipeline with the given name already exists.
-    Returns pipeline_id if found, or NOT_FOUND if it does not exist.
-    Always call this before deploying — if FOUND use update_dlt_pipeline,
-    if NOT_FOUND use create_dlt_pipeline.
+    Returns pipeline_id if FOUND, or NOT_FOUND if it does not exist.
+    Always call this before deploying.
+    If FOUND → call update_dlt_pipeline.
+    If NOT_FOUND → call create_dlt_pipeline.
 
     Args:
         pipeline_name: Exact name of the pipeline to look up
@@ -214,9 +215,9 @@ def upload_pipeline_notebook(
         notebook_code: Complete valid Python DLT notebook code written by you.
         overwrite: Whether to overwrite existing notebook (default True)
 
-    Example notebook_code for streaming from a UC table with transformation:
+    Example notebook_code for streaming from a UC table with two dependent tables:
         import dlt
-        from pyspark.sql.functions import col, to_timestamp
+        from pyspark.sql.functions import col, to_timestamp, date_trunc, count
 
         @dlt.table(name="azure_logs_clean")
         def azure_logs_clean():
@@ -224,6 +225,14 @@ def upload_pipeline_notebook(
                 spark.readStream
                     .table("dltvijay.source.azure_logs")
                     .withColumn("time", to_timestamp(col("time")))
+            )
+
+        @dlt.table(name="azure_logs_report")
+        def azure_logs_report():
+            return (
+                dlt.read("azure_logs_clean")
+                    .groupBy(date_trunc("hour", col("time")).alias("hour"))
+                    .agg(count("*").alias("log_count"))
             )
     """
     w = get_client()
@@ -292,6 +301,7 @@ def create_dlt_pipeline(
 @mcp.tool()
 def update_dlt_pipeline(
     pipeline_id: str,
+    pipeline_name: str,
     notebook_path: str,
     target_catalog: str,
     target_schema: str
@@ -303,6 +313,7 @@ def update_dlt_pipeline(
 
     Args:
         pipeline_id: Pipeline ID returned by get_pipeline_by_name
+        pipeline_name: Name of the pipeline (same as existing)
         notebook_path: Workspace path returned by upload_pipeline_notebook
         target_catalog: Target UC catalog
         target_schema: Target UC schema
@@ -311,6 +322,7 @@ def update_dlt_pipeline(
 
     w.pipelines.update(
         pipeline_id=pipeline_id,
+        name=pipeline_name,
         catalog=target_catalog,
         schema=target_schema,
         libraries=[
@@ -324,7 +336,8 @@ def update_dlt_pipeline(
     )
 
     return (
-        f"Pipeline '{pipeline_id}' updated successfully.\n"
+        f"Pipeline '{pipeline_name}' updated successfully.\n"
+        f"Pipeline ID: {pipeline_id}\n"
         f"Notebook: {notebook_path}\n"
         f"Target: {target_catalog}.{target_schema}"
     )
