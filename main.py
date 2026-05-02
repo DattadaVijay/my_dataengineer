@@ -171,98 +171,62 @@ def get_pipeline_status(pipeline_id: str) -> str:
     return f"Name: {p.name}\nState: {p.state}\nHealth: {p.health}"
 
 @mcp.tool()
+def get_pipeline_by_name(pipeline_name: str) -> str:
+    """
+    Check if a DLT pipeline with the given name already exists.
+    Returns pipeline_id if found, or NOT_FOUND if it does not exist.
+    Always call this before deploying — if FOUND use update_dlt_pipeline,
+    if NOT_FOUND use create_dlt_pipeline.
+
+    Args:
+        pipeline_name: Exact name of the pipeline to look up
+    """
+    w = get_client()
+    pipelines = list(w.pipelines.list_pipelines())
+    for p in pipelines:
+        if p.name == pipeline_name:
+            return (
+                f"FOUND\n"
+                f"pipeline_id: {p.pipeline_id}\n"
+                f"name: {p.name}\n"
+                f"state: {p.state}"
+            )
+    return "NOT_FOUND"
+
+@mcp.tool()
 def upload_pipeline_notebook(
     pipeline_name: str,
-    source_type: str,
-    source_catalog: str,
-    source_schema: str,
-    target_catalog: str,
-    target_schema: str,
-    target_table: str,
-    key_columns: str,
-    transformation_code: str,
-    source_table: str = "",
-    source_volume: str = "",
-    file_format: str = "json",
+    notebook_code: str,
     overwrite: bool = True
 ) -> str:
     """
-    Generate and upload a DLT pipeline notebook to Databricks workspace.
-    Call this first, then call create_dlt_pipeline with the returned notebook path.
+    Upload a DLT pipeline notebook to Databricks workspace at /Shared/pipelines/{pipeline_name}.
+
+    YOU write the complete notebook_code as valid Python — this tool only uploads it verbatim.
+    No templates, no code generation, no modifications to your code whatsoever.
+    Whatever you pass is exactly what gets uploaded.
+
+    Always call get_table_schema and get_table_sample first to understand the data,
+    then write the full correct DLT notebook yourself and pass it here.
 
     Args:
-        pipeline_name: Name of the pipeline (e.g. azure_logs_pipeline)
-        source_type: Either 'table' or 'volume'
-        source_catalog: Source UC catalog
-        source_schema: Source UC schema
-        target_catalog: Target UC catalog
-        target_schema: Target UC schema
-        target_table: Target table name
-        key_columns: Comma separated columns for deduplication (e.g. "time")
-        transformation_code: Raw PySpark chained calls applied BEFORE dedup.
-                             Must start with a dot. Example:
-                             .withColumn("time", to_timestamp(col("time")))
-                             Pass empty string if no transformations needed.
-        source_table: Source table name (required if source_type is 'table')
-        source_volume: Source volume name (required if source_type is 'volume')
-        file_format: File format json/csv/parquet (required if source_type is 'volume')
+        pipeline_name: Name used for the notebook path (e.g. azure_logs_pipeline)
+        notebook_code: Complete valid Python DLT notebook code written by you.
         overwrite: Whether to overwrite existing notebook (default True)
+
+    Example notebook_code for streaming from a UC table with transformation:
+        import dlt
+        from pyspark.sql.functions import col, to_timestamp
+
+        @dlt.table(name="azure_logs_clean")
+        def azure_logs_clean():
+            return (
+                spark.readStream
+                    .table("dltvijay.source.azure_logs")
+                    .withColumn("time", to_timestamp(col("time")))
+            )
     """
     w = get_client()
-
-    key_cols_list = [f'"{k.strip()}"' for k in key_columns.split(",")]
-    key_cols_str = ", ".join(key_cols_list)
-
-    if source_type == "table":
-        source_read = (
-            f'spark.readStream.table("{source_catalog}.{source_schema}.{source_table}")'
-        )
-        # For table sources order by first key column — _metadata not available
-        window_order = f'col("{key_columns.split(",")[0].strip()}")'
-    else:
-        source_read = (
-            f'spark.readStream\n'
-            f'            .format("cloudFiles")\n'
-            f'            .option("cloudFiles.format", "{file_format}")\n'
-            f'            .option("cloudFiles.schemaLocation",\n'
-            f'                    "/Volumes/{target_catalog}/{target_schema}/_schema/{pipeline_name}")\n'
-            f'            .load("/Volumes/{source_catalog}/{source_schema}/{source_volume}")'
-        )
-        # For volume sources _metadata.file_modification_time is available
-        window_order = 'col("_metadata.file_modification_time")'
-
-    # transformation_code passed verbatim — zero parsing
-    transform_code = f"\n            {transformation_code.strip()}" if transformation_code.strip() else ""
-
-    notebook_code = f'''import dlt
-from pyspark.sql.functions import col, row_number, to_timestamp
-from pyspark.sql.window import Window
-
-
-@dlt.table(
-    name="{target_table}_raw",
-    comment="Raw streaming data from {source_type} source"
-)
-def {target_table}_raw():
-    return (
-        {source_read}
-    )
-
-
-@dlt.table(
-    name="{target_table}",
-    comment="Cleaned and deduplicated table"
-)
-def {target_table}():
-    key_cols = [{key_cols_str}]
-    window = Window.partitionBy(*key_cols).orderBy({window_order}.desc())
-    return (
-        dlt.read_stream("{target_table}_raw"){transform_code}
-            .withColumn("_rank", row_number().over(window))
-            .filter(col("_rank") == 1)
-            .drop("_rank")
-    )
-'''
 
     notebook_path = f"/Shared/pipelines/{pipeline_name}"
 
@@ -281,7 +245,6 @@ def {target_table}():
 
     return f"Notebook uploaded successfully to: {notebook_path}"
 
-
 @mcp.tool()
 def create_dlt_pipeline(
     pipeline_name: str,
@@ -291,7 +254,8 @@ def create_dlt_pipeline(
     allow_duplicate_names: bool = False
 ) -> str:
     """
-    Create a DLT pipeline from an already uploaded notebook.
+    Create a new DLT pipeline from an already uploaded notebook.
+    Only call this when get_pipeline_by_name returns NOT_FOUND.
     Always call upload_pipeline_notebook first to get the notebook_path.
 
     Args:
@@ -321,6 +285,46 @@ def create_dlt_pipeline(
     return (
         f"Pipeline '{pipeline_name}' created successfully.\n"
         f"Pipeline ID: {pipeline.pipeline_id}\n"
+        f"Notebook: {notebook_path}\n"
+        f"Target: {target_catalog}.{target_schema}"
+    )
+
+@mcp.tool()
+def update_dlt_pipeline(
+    pipeline_id: str,
+    notebook_path: str,
+    target_catalog: str,
+    target_schema: str
+) -> str:
+    """
+    Update an existing DLT pipeline with a newly uploaded notebook.
+    Only call this when get_pipeline_by_name returns FOUND.
+    Always call upload_pipeline_notebook first to upload the updated code.
+
+    Args:
+        pipeline_id: Pipeline ID returned by get_pipeline_by_name
+        notebook_path: Workspace path returned by upload_pipeline_notebook
+        target_catalog: Target UC catalog
+        target_schema: Target UC schema
+    """
+    w = get_client()
+
+    w.pipelines.update(
+        pipeline_id=pipeline_id,
+        catalog=target_catalog,
+        schema=target_schema,
+        libraries=[
+            PipelineLibrary(
+                notebook=NotebookLibrary(path=notebook_path)
+            )
+        ],
+        continuous=False,
+        development=True,
+        serverless=True
+    )
+
+    return (
+        f"Pipeline '{pipeline_id}' updated successfully.\n"
         f"Notebook: {notebook_path}\n"
         f"Target: {target_catalog}.{target_schema}"
     )
