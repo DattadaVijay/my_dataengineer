@@ -1,12 +1,15 @@
 import os
 import json
 import base64
+import time 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.pipelines import PipelineLibrary, NotebookLibrary
 from databricks.sdk.service.workspace import ImportFormat, Language
 from databricks import sql
+from databricks.sdk.service.compute import ClusterSpec 
+from databricks.sdk.service.jobs import SubmitTask, NotebookTask    
 
 load_dotenv()
 
@@ -341,6 +344,232 @@ def update_dlt_pipeline(
         f"Notebook: {notebook_path}\n"
         f"Target: {target_catalog}.{target_schema}"
     )
+
+
+# ── Layer 4 — App Deployment + Playwright Testing ─────────────────────────────
+
+@mcp.tool()
+def deploy_databricks_app(
+    app_name: str,
+    app_code: str,
+    max_wait_seconds: int = 300,
+) -> str:
+    """
+    Upload a Streamlit app to Databricks Apps, deploy it, and wait until RUNNING.
+    Writes the code to /Shared/apps/{app_name}/app.py then deploys.
+    Returns the live URL once the app is running.
+
+    IMPORTANT: app_code MUST be valid Streamlit Python code.
+    Always use streamlit as the framework — no Flask, no Gradio, no plain Python.
+    The entry file must be app.py — Databricks Apps requires this exact filename.
+
+    A minimal valid Streamlit app looks like:
+        import streamlit as st
+        st.title("Hello World")
+        st.write("App is running.")
+
+    Args:
+        app_name: Name of the app (used for workspace path and app registry)
+        app_code: Complete valid Streamlit Python code
+        max_wait_seconds: How long to wait for RUNNING state (default 300s)
+    """
+    w = get_client()
+    app_path = f"/Shared/apps/{app_name}"
+    file_path = f"{app_path}/app.py"
+
+    # Step 1 — upload app.py to workspace
+    try:
+        w.workspace.mkdirs(path=app_path)
+    except Exception:
+        pass
+
+    w.workspace.import_(
+        path=file_path,
+        content=base64.b64encode(app_code.encode()).decode(),
+        format=ImportFormat.SOURCE,
+        language=Language.PYTHON,
+        overwrite=True
+    )
+
+    # Step 2 — create app if it doesn't exist, then deploy
+    existing_names = [a.name for a in w.apps.list()]
+
+    if app_name not in existing_names:
+        w.apps.create(name=app_name)
+        # wait for app to be created before deploying
+        time.sleep(5)
+
+    w.apps.deploy(
+        app_name=app_name,
+        source_code_path=app_path,
+    )
+
+    # Step 3 — poll until RUNNING and return URL
+    waited = 0
+    poll_interval = 10
+    state = "UNKNOWN"
+
+    while waited < max_wait_seconds:
+        app = w.apps.get(name=app_name)
+        state = str(app.compute_status.state) if app.compute_status else "UNKNOWN"
+
+        if "RUNNING" in state.upper() and app.url:
+            return (
+                f"App '{app_name}' is RUNNING.\n"
+                f"URL: {app.url}\n"
+                f"Source: {app_path}\n"
+                f"Pass URL to upload_playwright_test_notebook() to run UI tests."
+            )
+
+        if any(s in state.upper() for s in ["ERROR", "FAILED", "STOPPED"]):
+            return (
+                f"App '{app_name}' failed to start.\n"
+                f"State: {state}\n"
+                f"Check deployment logs in Databricks workspace."
+            )
+
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    return (
+        f"Timed out after {max_wait_seconds}s waiting for app to start.\n"
+        f"Last state: {state}\n"
+        f"App may still be starting — call get_app_url('{app_name}') to check."
+    )
+
+
+@mcp.tool()
+def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
+    """
+    Poll until the Databricks App is RUNNING and return its URL.
+    Times out after max_wait_seconds (default 120).
+
+    Args:
+        app_name: Name of the deployed app
+        max_wait_seconds: How long to wait before giving up
+    """
+    w = get_client()
+    waited = 0
+    poll_interval = 5
+    state = "UNKNOWN"
+
+    while waited < max_wait_seconds:
+        app = w.apps.get(name=app_name)
+        state = str(app.compute_status.state) if app.compute_status else "UNKNOWN"
+
+        if "RUNNING" in state.upper() and app.url:
+            return (
+                f"App '{app_name}' is RUNNING.\n"
+                f"URL: {app.url}\n"
+                f"Pass this URL to upload_playwright_test_notebook()"
+            )
+
+        if any(s in state.upper() for s in ["ERROR", "FAILED", "STOPPED"]):
+            return f"App '{app_name}' entered state: {state}. Check deployment logs."
+
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    return f"Timed out after {max_wait_seconds}s. Last state: {state}"
+
+
+@mcp.tool()
+def upload_playwright_test_notebook(
+    app_name: str,
+    app_url: str,
+    test_code: str,
+) -> str:
+    """
+    Upload a Playwright UI test notebook targeting the deployed app URL.
+    YOU write the complete test_code — this tool only uploads it verbatim.
+
+    The notebook runs inside Databricks so it has workspace auth natively.
+    Use the DATABRICKS_TOKEN env var for the Authorization header.
+
+    Args:
+        app_name: Used to name the notebook path
+        app_url: The live app URL returned by get_app_url()
+        test_code: Complete Python Playwright test code you have written
+    """
+    w = get_client()
+    notebook_path = f"/Shared/apps/{app_name}/tests"
+
+    try:
+        w.workspace.mkdirs(path=notebook_path)
+    except Exception:
+        pass
+
+    full_path = f"{notebook_path}/ui_test"
+    w.workspace.import_(
+        path=full_path,
+        content=base64.b64encode(test_code.encode()).decode(),
+        format=ImportFormat.SOURCE,
+        language=Language.PYTHON,
+        overwrite=True
+    )
+
+    return (
+        f"Test notebook uploaded to: {full_path}\n"
+        f"Targeting app URL: {app_url}\n"
+        f"Call run_and_get_test_results('{full_path}') to execute."
+    )
+
+
+@mcp.tool()
+def run_and_get_test_results(notebook_path: str, timeout_seconds: int = 300) -> str:
+    """
+    Run the Playwright test notebook as a one-time job and return results.
+    Polls until completion then returns stdout output.
+
+    Args:
+        notebook_path: Workspace path to the test notebook
+        timeout_seconds: Max wait time (default 300s)
+    """
+    w = get_client()
+    life_cycle = "UNKNOWN"
+
+    run = w.jobs.submit(
+        run_name=f"playwright-test-{int(time.time())}",
+        tasks=[
+            SubmitTask(
+                task_key="ui_test",
+                notebook_task=NotebookTask(
+                    notebook_path=notebook_path,
+                ),
+                new_cluster=ClusterSpec(
+                    spark_version="15.4.x-scala2.12",
+                    node_type_id="Standard_DS3_v2",
+                    num_workers=0,
+                    spark_conf={"spark.master": "local[*]"},
+                )
+            )
+        ]
+    )
+
+    run_id = run.run_id
+    waited = 0
+    poll_interval = 10
+
+    while waited < timeout_seconds:
+        run_state = w.jobs.get_run(run_id=run_id)
+        life_cycle = str(run_state.state.life_cycle_state)
+
+        if "TERMINATED" in life_cycle:
+            result_state = str(run_state.state.result_state)
+            output = w.jobs.get_run_output(run_id=run_id)
+            notebook_output = output.notebook_output.result if output.notebook_output else ""
+            logs = output.logs or ""
+
+            return (
+                f"Run {run_id} finished: {result_state}\n\n"
+                f"--- Output ---\n{notebook_output}\n"
+                f"--- Logs ---\n{logs[:2000]}"
+            )
+
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    return f"Timed out after {timeout_seconds}s. Run ID: {run_id} still in state: {life_cycle}"
 
 # ── Run ───────────────────────────────────────────────────────────────────────
 
