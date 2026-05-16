@@ -355,7 +355,6 @@ def deploy_databricks_app(
 ) -> str:
     """
     Upload a Streamlit app to Databricks Apps and trigger deployment.
-    Writes the code to /Users/{DATABRICKS_USER}/{app_name}/app.py then deploys.
     After calling this, call get_app_url() to wait for the app to be RUNNING.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
@@ -376,13 +375,18 @@ def deploy_databricks_app(
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
+
+    # workspace API uses /Users/... (no /Workspace prefix)
+    workspace_path = f"/Users/{user}/{app_name}"
+    file_path = f"{workspace_path}/app.py"
+
+    # apps deploy API uses /Workspace/Users/... 
     app_path = f"/Workspace/Users/{user}/{app_name}"
-    file_path = f"{app_path}/app.py"
 
     try:
-        # Step 1 — upload app.py
+        # Step 1 — upload app.py to workspace
         try:
-            w.workspace.mkdirs(path=app_path)
+            w.workspace.mkdirs(path=workspace_path)
         except Exception:
             pass
 
@@ -395,16 +399,16 @@ def deploy_databricks_app(
         )
         print(f"SUCCESS: uploaded to {file_path}")
 
-        # Step 2 — create app if needed
+        # Step 2 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
             w.apps.create(App(name=app_name))
-            time.sleep(5)
             print(f"SUCCESS: app created")
-
-        # Step 3 — deploy
+            time.sleep(10)
+        
+        # Step 3 — deploy source code
         w.apps.deploy(
             app_name=app_name,
             app_deployment=AppDeployment(
