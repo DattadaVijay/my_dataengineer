@@ -402,7 +402,8 @@ def create_databricks_app(
 
         if app_name not in existing_names:
             print(f"INFO: creating app {app_name} and waiting for ready state...")
-            w.apps.create_and_wait(name=app_name)
+            from databricks.sdk.service.apps import App, AppDeploymentMode
+            w.apps.create_and_wait(App(name=app_name))
             print(f"SUCCESS: app ready")
         else:
             print(f"INFO: app already exists")
