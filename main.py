@@ -376,7 +376,7 @@ def deploy_databricks_app(
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
-    app_path = f"/Users/{user}/{app_name}"
+    app_path = f"/Workspace/Users/{user}/{app_name}"
     file_path = f"{app_path}/app.py"
 
     try:
