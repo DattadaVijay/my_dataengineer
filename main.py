@@ -346,7 +346,7 @@ def update_dlt_pipeline(
     )
 
 
-## ── Layer 4 — App Deployment + Playwright Testing ─────────────────────────────
+# ── Layer 4 — App Deployment + Playwright Testing ─────────────────────────────
 
 @mcp.tool()
 def create_databricks_app(
@@ -354,7 +354,7 @@ def create_databricks_app(
     app_code: str,
 ) -> str:
     """
-    Step 1 of 2: Create a Databricks App, upload Streamlit source code, and deploy.
+    Create a Databricks App, upload Streamlit source code, and deploy.
     Waits for app to be ready then deploys automatically.
     After this succeeds, call get_app_url() to get the live URL.
 
@@ -371,7 +371,7 @@ def create_databricks_app(
         app_name: Name of the app (used for workspace path and app registry)
         app_code: Complete valid Streamlit Python code
     """
-    from databricks.sdk.service.apps import AppDeploymentMode
+    from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode
     import traceback
 
     w = get_client()
@@ -402,18 +402,19 @@ def create_databricks_app(
 
         if app_name not in existing_names:
             print(f"INFO: creating app {app_name} and waiting for ready state...")
-            from databricks.sdk.service.apps import App, AppDeploymentMode
             w.apps.create_and_wait(App(name=app_name))
             print(f"SUCCESS: app ready")
         else:
             print(f"INFO: app already exists")
 
-        # Step 3 — deploy source code
+        # Step 3 — deploy source code and wait
         print(f"INFO: deploying source from {app_path}")
         w.apps.deploy_and_wait(
-            app_name,
-            app_path,
-            AppDeploymentMode.SNAPSHOT,
+            app_name=app_name,
+            app_deployment=AppDeployment(
+                source_code_path=app_path,
+                mode=AppDeploymentMode.SNAPSHOT,
+            ),
         )
         print(f"SUCCESS: deployment complete")
 
@@ -427,15 +428,13 @@ def create_databricks_app(
         error_msg = traceback.format_exc()
         print(f"ERROR in create_databricks_app:\n{error_msg}")
         return f"Deployment failed with error:\n{str(e)}\n\nFull traceback:\n{error_msg}"
-    
-    
 
 
 @mcp.tool()
 def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
     """
-    Step 3 of 3: Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
-    Call this after trigger_app_deployment() succeeds.
+    Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
+    Call this after create_databricks_app() succeeds.
     Times out after max_wait_seconds (default 120).
 
     Args:
