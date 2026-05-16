@@ -371,6 +371,8 @@ def deploy_databricks_app(
         app_name: Name of the app (used for workspace path and app registry)
         app_code: Complete valid Streamlit Python code
     """
+    from databricks.sdk.service.apps import App, AppDeployment
+
     w = get_client()
     app_path = f"/Shared/apps/{app_name}"
     file_path = f"{app_path}/app.py"
@@ -393,14 +395,15 @@ def deploy_databricks_app(
     existing_names = [a.name for a in w.apps.list()]
 
     if app_name not in existing_names:
-        from databricks.sdk.service.apps import App
         w.apps.create(App(name=app_name))
         time.sleep(5)
 
     # Step 3 — trigger deploy and return immediately
     w.apps.deploy(
         app_name=app_name,
-        source_code_path=app_path,
+        app_deployment=AppDeployment(
+            source_code_path=app_path,
+        )
     )
 
     return (
@@ -408,6 +411,7 @@ def deploy_databricks_app(
         f"Source uploaded to: {file_path}\n"
         f"Now call get_app_url('{app_name}') to wait for RUNNING status and get the URL."
     )
+
 
 @mcp.tool()
 def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
