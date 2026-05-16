@@ -346,16 +346,17 @@ def update_dlt_pipeline(
     )
 
 
-# ── Layer 4 — App Deployment + Playwright Testing ─────────────────────────────
+## ── Layer 4 — App Deployment + Playwright Testing ─────────────────────────────
 
 @mcp.tool()
-def deploy_databricks_app(
+def create_databricks_app(
     app_name: str,
     app_code: str,
 ) -> str:
     """
-    Upload a Streamlit app to Databricks Apps and trigger deployment.
-    After calling this, call get_app_url() to get the live URL.
+    Step 1 of 2: Create a Databricks App, upload Streamlit source code, and deploy.
+    Waits for app to be ready then deploys automatically.
+    After this succeeds, call get_app_url() to get the live URL.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
     Always use streamlit as the framework — no Flask, no Gradio, no plain Python.
@@ -370,17 +371,13 @@ def deploy_databricks_app(
         app_name: Name of the app (used for workspace path and app registry)
         app_code: Complete valid Streamlit Python code
     """
-    from databricks.sdk.service.apps import App, AppDeployment
+    from databricks.sdk.service.apps import AppDeploymentMode
     import traceback
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
-
-    # workspace API uses /Users/... (no /Workspace prefix)
     workspace_path = f"/Users/{user}/{app_name}"
     file_path = f"{workspace_path}/app.py"
-
-    # apps deploy API uses /Workspace/Users/...
     app_path = f"/Workspace/Users/{user}/{app_name}"
 
     try:
@@ -399,56 +396,45 @@ def deploy_databricks_app(
         )
         print(f"SUCCESS: uploaded to {file_path}")
 
-        # Step 2 — create app if needed and wait for RUNNING
+        # Step 2 — create app if needed, wait until ready
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
-            w.apps.create(App(name=app_name))
-            print(f"SUCCESS: app created, waiting for RUNNING state...")
-            for _ in range(30):
-                time.sleep(5)
-                app_state = w.apps.get(name=app_name)
-                state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
-                print(f"INFO: state = {state}")
-                if any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
-                    print(f"SUCCESS: app is {state}")
-                    break
-            else:
-                return f"App created but timed out waiting for RUNNING. Last state: {state}"
+            print(f"INFO: creating app {app_name} and waiting for ready state...")
+            w.apps.create_and_wait(name=app_name)
+            print(f"SUCCESS: app ready")
         else:
-            # existing app — check it is running
-            app_state = w.apps.get(name=app_name)
-            state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
-            print(f"INFO: existing app state = {state}")
-            if not any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
-                return f"App exists but is in state: {state}. Please start it manually in Databricks UI first."
+            print(f"INFO: app already exists")
 
         # Step 3 — deploy source code
-        w.apps.deploy(
+        print(f"INFO: deploying source from {app_path}")
+        w.apps.deploy_and_wait(
             app_name=app_name,
-            app_deployment=AppDeployment(
-                source_code_path=app_path,
-            )
+            source_code_path=app_path,
+            mode=AppDeploymentMode.SNAPSHOT,
         )
-        print(f"SUCCESS: deploy triggered")
+        print(f"SUCCESS: deployment complete")
 
         return (
-            f"App '{app_name}' deployment triggered.\n"
-            f"Source uploaded to: {file_path}\n"
+            f"App '{app_name}' deployed successfully.\n"
+            f"Source: {file_path}\n"
             f"Now call get_app_url('{app_name}') to get the live URL."
         )
 
     except Exception as e:
         error_msg = traceback.format_exc()
-        print(f"ERROR in deploy_databricks_app:\n{error_msg}")
+        print(f"ERROR in create_databricks_app:\n{error_msg}")
         return f"Deployment failed with error:\n{str(e)}\n\nFull traceback:\n{error_msg}"
+    
+    
 
 
 @mcp.tool()
 def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
     """
-    Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
+    Step 3 of 3: Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
+    Call this after trigger_app_deployment() succeeds.
     Times out after max_wait_seconds (default 120).
 
     Args:
