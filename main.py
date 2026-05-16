@@ -411,9 +411,9 @@ def create_databricks_app(
         # Step 3 — deploy source code
         print(f"INFO: deploying source from {app_path}")
         w.apps.deploy_and_wait(
-            app_name=app_name,
-            source_code_path=app_path,
-            mode=AppDeploymentMode.SNAPSHOT,
+            app_name,
+            app_path,
+            AppDeploymentMode.SNAPSHOT,
         )
         print(f"SUCCESS: deployment complete")
 
