@@ -352,12 +352,11 @@ def update_dlt_pipeline(
 def deploy_databricks_app(
     app_name: str,
     app_code: str,
-    max_wait_seconds: int = 300,
 ) -> str:
     """
-    Upload a Streamlit app to Databricks Apps, deploy it, and wait until RUNNING.
+    Upload a Streamlit app to Databricks Apps and trigger deployment.
     Writes the code to /Shared/apps/{app_name}/app.py then deploys.
-    Returns the live URL once the app is running.
+    After calling this, call get_app_url() to wait for the app to be RUNNING.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
     Always use streamlit as the framework — no Flask, no Gradio, no plain Python.
@@ -371,7 +370,6 @@ def deploy_databricks_app(
     Args:
         app_name: Name of the app (used for workspace path and app registry)
         app_code: Complete valid Streamlit Python code
-        max_wait_seconds: How long to wait for RUNNING state (default 300s)
     """
     w = get_client()
     app_path = f"/Shared/apps/{app_name}"
@@ -391,50 +389,23 @@ def deploy_databricks_app(
         overwrite=True
     )
 
-    # Step 2 — create app if it doesn't exist, then deploy
+    # Step 2 — create app if it doesn't exist
     existing_names = [a.name for a in w.apps.list()]
 
     if app_name not in existing_names:
         w.apps.create(name=app_name)
-        # wait for app to be created before deploying
         time.sleep(5)
 
+    # Step 3 — trigger deploy and return immediately
     w.apps.deploy(
         app_name=app_name,
         source_code_path=app_path,
     )
 
-    # Step 3 — poll until RUNNING and return URL
-    waited = 0
-    poll_interval = 10
-    state = "UNKNOWN"
-
-    while waited < max_wait_seconds:
-        app = w.apps.get(name=app_name)
-        state = str(app.compute_status.state) if app.compute_status else "UNKNOWN"
-
-        if "RUNNING" in state.upper() and app.url:
-            return (
-                f"App '{app_name}' is RUNNING.\n"
-                f"URL: {app.url}\n"
-                f"Source: {app_path}\n"
-                f"Pass URL to upload_playwright_test_notebook() to run UI tests."
-            )
-
-        if any(s in state.upper() for s in ["ERROR", "FAILED", "STOPPED"]):
-            return (
-                f"App '{app_name}' failed to start.\n"
-                f"State: {state}\n"
-                f"Check deployment logs in Databricks workspace."
-            )
-
-        time.sleep(poll_interval)
-        waited += poll_interval
-
     return (
-        f"Timed out after {max_wait_seconds}s waiting for app to start.\n"
-        f"Last state: {state}\n"
-        f"App may still be starting — call get_app_url('{app_name}') to check."
+        f"App '{app_name}' deployment triggered.\n"
+        f"Source uploaded to: {file_path}\n"
+        f"Now call get_app_url('{app_name}') to wait for RUNNING status and get the URL."
     )
 
 
