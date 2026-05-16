@@ -355,7 +355,7 @@ def deploy_databricks_app(
 ) -> str:
     """
     Upload a Streamlit app to Databricks Apps and trigger deployment.
-    Writes the code to /Shared/apps/{app_name}/app.py then deploys.
+    Writes the code to /Users/{DATABRICKS_USER}/{app_name}/app.py then deploys.
     After calling this, call get_app_url() to wait for the app to be RUNNING.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
@@ -374,10 +374,11 @@ def deploy_databricks_app(
     from databricks.sdk.service.apps import App, AppDeployment
 
     w = get_client()
-    app_path = f"/Shared/apps/{app_name}"
+    user = os.environ["DATABRICKS_USER"]
+    app_path = f"/Users/{user}/{app_name}"
     file_path = f"{app_path}/app.py"
 
-    # Step 1 — upload app.py to workspace
+    # Step 1 — upload app.py to correct workspace path
     try:
         w.workspace.mkdirs(path=app_path)
     except Exception:
@@ -416,7 +417,7 @@ def deploy_databricks_app(
 @mcp.tool()
 def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
     """
-    Poll until the Databricks App is RUNNING and return its URL.
+    Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
     Times out after max_wait_seconds (default 120).
 
     Args:
@@ -432,9 +433,9 @@ def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
         app = w.apps.get(name=app_name)
         state = str(app.compute_status.state) if app.compute_status else "UNKNOWN"
 
-        if "RUNNING" in state.upper() and app.url:
+        if any(s in state.upper() for s in ["RUNNING", "ACTIVE"]) and app.url:
             return (
-                f"App '{app_name}' is RUNNING.\n"
+                f"App '{app_name}' is {state}.\n"
                 f"URL: {app.url}\n"
                 f"Pass this URL to upload_playwright_test_notebook()"
             )
@@ -467,7 +468,8 @@ def upload_playwright_test_notebook(
         test_code: Complete Python Playwright test code you have written
     """
     w = get_client()
-    notebook_path = f"/Shared/apps/{app_name}/tests"
+    user = os.environ["DATABRICKS_USER"]
+    notebook_path = f"/Users/{user}/{app_name}/tests"
 
     try:
         w.workspace.mkdirs(path=notebook_path)
