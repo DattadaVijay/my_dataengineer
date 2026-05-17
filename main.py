@@ -374,63 +374,51 @@ def create_databricks_app(
     """
     from databricks.sdk.service.apps import App
     import traceback
+    import io
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
     workspace_path = f"/Users/{user}/{app_name}"
-    file_path = f"{workspace_path}/app.py"
-    yaml_path = f"{workspace_path}/app.yaml"
-    req_path = f"{workspace_path}/requirements.txt"
+
+    app_yaml = (
+        'command:\n'
+        '  - streamlit\n'
+        '  - run\n'
+        '  - app.py\n'
+        '  - --server.port\n'
+        '  - $DATABRICKS_APP_PORT\n'
+        '  - --server.address\n'
+        '  - 0.0.0.0\n'
+    )
+
+    requirements = "streamlit\nrequests\n"
 
     try:
-        # Step 1 — create workspace folder
-        try:
-            w.workspace.mkdirs(path=workspace_path)
-        except Exception:
-            pass
-
-        # Step 2 — upload app.py
-        w.workspace.import_(
-            path=file_path,
-            content=base64.b64encode(app_code.encode()).decode(),
-            format=ImportFormat.SOURCE,
-            language=Language.PYTHON,
+        # Step 1 — upload app.py as real file
+        w.files.upload(
+            file_path=f"{workspace_path}/app.py",
+            contents=io.BytesIO(app_code.encode()),
             overwrite=True
         )
-        print(f"SUCCESS: uploaded app.py to {file_path}")
+        print(f"SUCCESS: uploaded app.py")
 
-        # Step 3 — upload app.yaml with streamlit run command
-        app_yaml = (
-            'command:\n'
-            '  - streamlit\n'
-            '  - run\n'
-            '  - app.py\n'
-            '  - --server.port\n'
-            '  - $DATABRICKS_APP_PORT\n'
-            '  - --server.address\n'
-            '  - 0.0.0.0\n'
-        )
-        w.workspace.import_(
-            path=yaml_path,
-            content=base64.b64encode(app_yaml.encode()).decode(),
-            format=ImportFormat.SOURCE,
-            language=Language.PYTHON,
+        # Step 2 — upload app.yaml as real file
+        w.files.upload(
+            file_path=f"{workspace_path}/app.yaml",
+            contents=io.BytesIO(app_yaml.encode()),
             overwrite=True
         )
-        print(f"SUCCESS: uploaded app.yaml to {yaml_path}")
+        print(f"SUCCESS: uploaded app.yaml")
 
-        # Step 4 — upload requirements.txt
-        requirements = "streamlit\nrequests\n"
-        w.workspace.import_(
-            path=req_path,
-            content=base64.b64encode(requirements.encode()).decode(),
-            format=ImportFormat.SOURCE,
-            language=Language.PYTHON,
+        # Step 3 — upload requirements.txt as real file
+        w.files.upload(
+            file_path=f"{workspace_path}/requirements.txt",
+            contents=io.BytesIO(requirements.encode()),
             overwrite=True
         )
-        print(f"SUCCESS: uploaded requirements.txt to {req_path}")
+        print(f"SUCCESS: uploaded requirements.txt")
 
-        # Step 5 — create app if it doesn't exist
+        # Step 4 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
@@ -442,10 +430,10 @@ def create_databricks_app(
 
         return (
             f"App '{app_name}' created and source uploaded.\n"
-            f"Files uploaded:\n"
-            f"  - {file_path}\n"
-            f"  - {yaml_path}\n"
-            f"  - {req_path}\n"
+            f"Files uploaded to: {workspace_path}\n"
+            f"  - app.py\n"
+            f"  - app.yaml\n"
+            f"  - requirements.txt\n"
             f"App compute is starting — this takes 1-2 minutes.\n"
             f"Once ready, say 'deploy app {app_name}' to deploy."
         )
