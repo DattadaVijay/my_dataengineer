@@ -354,8 +354,10 @@ def create_databricks_app(
     app_code: str,
 ) -> str:
     """
-    Create a Databricks App, upload Streamlit source code, and deploy.
-    After this returns, call get_app_url() to get the live URL.
+    Step 1: Create a Databricks App and upload Streamlit source code.
+    This returns immediately — does NOT deploy yet.
+    After calling this, wait for the app to become ACTIVE in Databricks UI
+    then say 'deploy app {app_name}' to trigger deployment.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
     Always use streamlit as the framework — no Flask, no Gradio, no plain Python.
@@ -370,7 +372,7 @@ def create_databricks_app(
         app_name: Name of the app (used for workspace path and app registry)
         app_code: Complete valid Streamlit Python code
     """
-    from databricks.sdk.service.apps import App, AppDeployment, AppDeploymentMode
+    from databricks.sdk.service.apps import App
     import traceback
 
     w = get_client()
@@ -378,7 +380,6 @@ def create_databricks_app(
     workspace_path = f"/Users/{user}/{app_name}"
     file_path = f"{workspace_path}/app.py"
     yaml_path = f"{workspace_path}/app.yaml"
-    app_path = f"/Workspace/Users/{user}/{app_name}"
 
     try:
         # Step 1 — create workspace folder
@@ -417,29 +418,68 @@ def create_databricks_app(
         )
         print(f"SUCCESS: uploaded app.yaml to {yaml_path}")
 
-        # Step 4 — create app if it doesn't exist, poll until ACTIVE
+        # Step 4 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
             w.apps.create(App(name=app_name))
-            print(f"SUCCESS: app created, polling for ACTIVE state...")
-            for _ in range(24):
-                time.sleep(5)
-                app_state = w.apps.get(name=app_name)
-                state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
-                print(f"INFO: state = {state}")
-                if any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
-                    print(f"SUCCESS: app is {state}")
-                    break
+            print(f"SUCCESS: app registered")
         else:
-            print(f"INFO: app already exists, checking state...")
-            app_state = w.apps.get(name=app_name)
-            state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
-            if not any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
-                return f"App exists but is in state: {state}. Please start it manually in Databricks UI."
+            print(f"INFO: app already exists")
 
-        # Step 5 — deploy source code non-blocking
+        return (
+            f"App '{app_name}' created and source uploaded.\n"
+            f"Files at: {workspace_path}\n"
+            f"App compute is starting — this takes 1-2 minutes.\n"
+            f"Once ready, say 'deploy app {app_name}' to deploy the source code."
+        )
+
+    except Exception as e:
+        error_msg = traceback.format_exc()
+        print(f"ERROR in create_databricks_app:\n{error_msg}")
+        return f"Failed with error:\n{str(e)}\n\nFull traceback:\n{error_msg}"
+
+
+@mcp.tool()
+def deploy_databricks_app(app_name: str) -> str:
+    """
+    Step 2: Deploy source code to an existing Databricks App.
+    Call this after create_databricks_app() once the app compute is ACTIVE.
+    Checks that the app exists and is in ACTIVE/RUNNING state before deploying.
+    After this succeeds, call get_app_url() to get the live URL.
+
+    Args:
+        app_name: Name of the app created by create_databricks_app()
+    """
+    from databricks.sdk.service.apps import AppDeployment, AppDeploymentMode
+    import traceback
+
+    w = get_client()
+    user = os.environ["DATABRICKS_USER"]
+    app_path = f"/Workspace/Users/{user}/{app_name}"
+
+    try:
+        # Check app exists
+        existing_names = [a.name for a in w.apps.list()]
+        if app_name not in existing_names:
+            return (
+                f"App '{app_name}' does not exist.\n"
+                f"Call create_databricks_app('{app_name}', app_code) first."
+            )
+
+        # Check app state
+        app_state = w.apps.get(name=app_name)
+        state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
+        print(f"INFO: app state = {state}")
+
+        if not any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
+            return (
+                f"App '{app_name}' is in state: {state} — not ready yet.\n"
+                f"Wait another 30 seconds and say 'deploy app {app_name}' again."
+            )
+
+        # Deploy source code
         w.apps.deploy(
             app_name=app_name,
             app_deployment=AppDeployment(
@@ -447,18 +487,17 @@ def create_databricks_app(
                 mode=AppDeploymentMode.SNAPSHOT,
             )
         )
-        print(f"SUCCESS: deployment triggered")
+        print(f"SUCCESS: deployment triggered for {app_name}")
 
         return (
-            f"App '{app_name}' deployment triggered.\n"
-            f"Source: {file_path}\n"
-            f"app.yaml: {yaml_path}\n"
+            f"App '{app_name}' deployment triggered successfully.\n"
+            f"Source: {app_path}\n"
             f"Now call get_app_url('{app_name}') to get the live URL."
         )
 
     except Exception as e:
         error_msg = traceback.format_exc()
-        print(f"ERROR in create_databricks_app:\n{error_msg}")
+        print(f"ERROR in deploy_databricks_app:\n{error_msg}")
         return f"Deployment failed with error:\n{str(e)}\n\nFull traceback:\n{error_msg}"
 
 
@@ -466,7 +505,7 @@ def create_databricks_app(
 def get_app_url(app_name: str, max_wait_seconds: int = 120) -> str:
     """
     Poll until the Databricks App is RUNNING or ACTIVE and return its URL.
-    Call this after create_databricks_app() succeeds.
+    Call this after deploy_databricks_app() succeeds.
     Times out after max_wait_seconds (default 120).
 
     Args:
