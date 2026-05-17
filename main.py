@@ -355,8 +355,7 @@ def create_databricks_app(
 ) -> str:
     """
     Create a Databricks App, upload Streamlit source code, and deploy.
-    Waits for app to be ready then deploys automatically.
-    After this succeeds, call get_app_url() to get the live URL.
+    After this returns, call get_app_url() to get the live URL.
 
     IMPORTANT: app_code MUST be valid Streamlit Python code.
     Always use streamlit as the framework — no Flask, no Gradio, no plain Python.
@@ -378,15 +377,17 @@ def create_databricks_app(
     user = os.environ["DATABRICKS_USER"]
     workspace_path = f"/Users/{user}/{app_name}"
     file_path = f"{workspace_path}/app.py"
+    yaml_path = f"{workspace_path}/app.yaml"
     app_path = f"/Workspace/Users/{user}/{app_name}"
 
     try:
-        # Step 1 — upload app.py to workspace
+        # Step 1 — create workspace folder
         try:
             w.workspace.mkdirs(path=workspace_path)
         except Exception:
             pass
 
+        # Step 2 — upload app.py
         w.workspace.import_(
             path=file_path,
             content=base64.b64encode(app_code.encode()).decode(),
@@ -394,33 +395,53 @@ def create_databricks_app(
             language=Language.PYTHON,
             overwrite=True
         )
-        print(f"SUCCESS: uploaded to {file_path}")
+        print(f"SUCCESS: uploaded app.py to {file_path}")
 
-        # Step 2 — create app if needed, wait until ready
+        # Step 3 — upload app.yaml with streamlit run command
+        app_yaml = (
+            'command:\n'
+            '  - streamlit\n'
+            '  - run\n'
+            '  - app.py\n'
+            '  - --server.port\n'
+            '  - $DATABRICKS_APP_PORT\n'
+            '  - --server.address\n'
+            '  - 0.0.0.0\n'
+        )
+        w.workspace.import_(
+            path=yaml_path,
+            content=base64.b64encode(app_yaml.encode()).decode(),
+            format=ImportFormat.SOURCE,
+            language=Language.PYTHON,
+            overwrite=True
+        )
+        print(f"SUCCESS: uploaded app.yaml to {yaml_path}")
+
+        # Step 4 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
-            print(f"INFO: creating app {app_name} and waiting for ready state...")
-            w.apps.create_and_wait(App(name=app_name))
-            print(f"SUCCESS: app ready")
+            w.apps.create(name=app_name)
+            print(f"SUCCESS: app created")
+            time.sleep(30)
         else:
             print(f"INFO: app already exists")
 
-        # Step 3 — deploy source code and wait
-        print(f"INFO: deploying source from {app_path}")
-        w.apps.deploy_and_wait(
+        # Step 5 — deploy source code non-blocking
+        w.apps.deploy(
             app_name=app_name,
             app_deployment=AppDeployment(
                 source_code_path=app_path,
                 mode=AppDeploymentMode.SNAPSHOT,
-            ),
+            )
         )
-        print(f"SUCCESS: deployment complete")
+        print(f"SUCCESS: deployment triggered")
 
         return (
-            f"App '{app_name}' deployed successfully.\n"
+            f"App '{app_name}' deployment triggered.\n"
             f"Source: {file_path}\n"
+            f"app.yaml: {yaml_path}\n"
             f"Now call get_app_url('{app_name}') to get the live URL."
         )
 
