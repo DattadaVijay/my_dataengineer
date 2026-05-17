@@ -380,6 +380,7 @@ def create_databricks_app(
     workspace_path = f"/Users/{user}/{app_name}"
     file_path = f"{workspace_path}/app.py"
     yaml_path = f"{workspace_path}/app.yaml"
+    req_path = f"{workspace_path}/requirements.txt"
 
     try:
         # Step 1 — create workspace folder
@@ -418,7 +419,18 @@ def create_databricks_app(
         )
         print(f"SUCCESS: uploaded app.yaml to {yaml_path}")
 
-        # Step 4 — create app if it doesn't exist
+        # Step 4 — upload requirements.txt
+        requirements = "streamlit\nrequests\n"
+        w.workspace.import_(
+            path=req_path,
+            content=base64.b64encode(requirements.encode()).decode(),
+            format=ImportFormat.SOURCE,
+            language=Language.PYTHON,
+            overwrite=True
+        )
+        print(f"SUCCESS: uploaded requirements.txt to {req_path}")
+
+        # Step 5 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
@@ -430,9 +442,12 @@ def create_databricks_app(
 
         return (
             f"App '{app_name}' created and source uploaded.\n"
-            f"Files at: {workspace_path}\n"
+            f"Files uploaded:\n"
+            f"  - {file_path}\n"
+            f"  - {yaml_path}\n"
+            f"  - {req_path}\n"
             f"App compute is starting — this takes 1-2 minutes.\n"
-            f"Once ready, say 'deploy app {app_name}' to deploy the source code."
+            f"Once ready, say 'deploy app {app_name}' to deploy."
         )
 
     except Exception as e:
