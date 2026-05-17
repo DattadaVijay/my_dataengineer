@@ -378,7 +378,7 @@ def create_databricks_app(
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
-    workspace_path = f"/Users/{user}/{app_name}"
+    workspace_path = f"/Workspace/Users/{user}/{app_name}"
 
     app_yaml = (
         'command:\n'
