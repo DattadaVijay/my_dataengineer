@@ -417,16 +417,27 @@ def create_databricks_app(
         )
         print(f"SUCCESS: uploaded app.yaml to {yaml_path}")
 
-        # Step 4 — create app if it doesn't exist
+        # Step 4 — create app if it doesn't exist, poll until ACTIVE
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
             w.apps.create(App(name=app_name))
-            print(f"SUCCESS: app created")
-            time.sleep(30)
+            print(f"SUCCESS: app created, polling for ACTIVE state...")
+            for _ in range(24):
+                time.sleep(5)
+                app_state = w.apps.get(name=app_name)
+                state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
+                print(f"INFO: state = {state}")
+                if any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
+                    print(f"SUCCESS: app is {state}")
+                    break
         else:
-            print(f"INFO: app already exists")
+            print(f"INFO: app already exists, checking state...")
+            app_state = w.apps.get(name=app_name)
+            state = str(app_state.compute_status.state) if app_state.compute_status else "UNKNOWN"
+            if not any(s in state.upper() for s in ["RUNNING", "ACTIVE"]):
+                return f"App exists but is in state: {state}. Please start it manually in Databricks UI."
 
         # Step 5 — deploy source code non-blocking
         w.apps.deploy(
