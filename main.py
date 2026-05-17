@@ -422,7 +422,7 @@ def create_databricks_app(
         print(f"INFO: existing apps = {existing_names}")
 
         if app_name not in existing_names:
-            w.apps.create(name=app_name)
+            w.apps.create(App(name=app_name))
             print(f"SUCCESS: app created")
             time.sleep(30)
         else:
