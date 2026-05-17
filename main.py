@@ -373,12 +373,13 @@ def create_databricks_app(
         app_code: Complete valid Streamlit Python code
     """
     from databricks.sdk.service.apps import App
+    from databricks.sdk.service.workspace import ImportFormat
     import traceback
     import io
 
     w = get_client()
     user = os.environ["DATABRICKS_USER"]
-    workspace_path = f"/Workspace/Users/{user}/{app_name}"
+    workspace_path = f"/Users/{user}/{app_name}"
 
     app_yaml = (
         'command:\n'
@@ -394,31 +395,40 @@ def create_databricks_app(
     requirements = "streamlit\nrequests\n"
 
     try:
-        # Step 1 — upload app.py as real file
-        w.files.upload(
-            file_path=f"{workspace_path}/app.py",
-            contents=io.BytesIO(app_code.encode()),
+        # Step 1 — create workspace folder
+        try:
+            w.workspace.mkdirs(path=workspace_path)
+        except Exception:
+            pass
+
+        # Step 2 — upload app.py as real workspace file
+        w.workspace.upload(
+            path=f"{workspace_path}/app.py",
+            content=io.BytesIO(app_code.encode()),
+            format=ImportFormat.AUTO,
             overwrite=True
         )
         print(f"SUCCESS: uploaded app.py")
 
-        # Step 2 — upload app.yaml as real file
-        w.files.upload(
-            file_path=f"{workspace_path}/app.yaml",
-            contents=io.BytesIO(app_yaml.encode()),
+        # Step 3 — upload app.yaml as real workspace file
+        w.workspace.upload(
+            path=f"{workspace_path}/app.yaml",
+            content=io.BytesIO(app_yaml.encode()),
+            format=ImportFormat.AUTO,
             overwrite=True
         )
         print(f"SUCCESS: uploaded app.yaml")
 
-        # Step 3 — upload requirements.txt as real file
-        w.files.upload(
-            file_path=f"{workspace_path}/requirements.txt",
-            contents=io.BytesIO(requirements.encode()),
+        # Step 4 — upload requirements.txt as real workspace file
+        w.workspace.upload(
+            path=f"{workspace_path}/requirements.txt",
+            content=io.BytesIO(requirements.encode()),
+            format=ImportFormat.AUTO,
             overwrite=True
         )
         print(f"SUCCESS: uploaded requirements.txt")
 
-        # Step 4 — create app if it doesn't exist
+        # Step 5 — create app if it doesn't exist
         existing_names = [a.name for a in w.apps.list()]
         print(f"INFO: existing apps = {existing_names}")
 
